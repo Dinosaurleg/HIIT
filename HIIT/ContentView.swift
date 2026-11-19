@@ -6,6 +6,7 @@
 //
 
 import Combine
+import AudioToolbox
 import SwiftData
 import SwiftUI
 
@@ -13,20 +14,35 @@ struct ContentView: View {
     @Environment(\.modelContext) private var modelContext
     @Query private var timers: [HIITTimer]
     @State private var isAddingTimer = false
+    @State private var playingTimer: HIITTimer?
 
     var body: some View {
         NavigationSplitView {
             List {
                 ForEach(timers) { timer in
-                    NavigationLink {
-                        TimerDetailView(timer: timer)
-                    } label: {
-                        VStack(alignment: .leading) {
-                            Text(timer.name)
-                            Text("\(formatDuration(seconds(fromMinutes: timer.workPeriod))) work / \(formatDuration(seconds(fromMinutes: timer.restPeriod))) rest")
-                                .font(.subheadline)
-                                .foregroundStyle(.secondary)
+                    HStack {
+                        Button {
+                            playingTimer = timer
+                        } label: {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title2)
                         }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Play \(timer.name)")
+
+                        NavigationLink {
+                            TimerDetailView(timer: timer)
+                        } label: {
+                            VStack(alignment: .leading) {
+                                Text(timer.name)
+                                Text("\(formatDuration(seconds(fromMinutes: timer.workPeriod))) work / \(formatDuration(seconds(fromMinutes: timer.restPeriod))) rest / \(timer.rounds) rounds")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .onDelete(perform: deleteTimers)
@@ -50,6 +66,16 @@ struct ContentView: View {
         .sheet(isPresented: $isAddingTimer) {
             AddTimerView()
         }
+        .sheet(item: $playingTimer) { timer in
+            NavigationStack {
+                LiveTimerView(timer: timer, autoStart: true)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { playingTimer = nil }
+                        }
+                    }
+            }
+        }
     }
 
     private func deleteTimers(offsets: IndexSet) {
@@ -65,6 +91,8 @@ private struct AddTimerView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
 
+    private let timer: HIITTimer?
+    private let onFinish: (() -> Void)?
     @State private var name = ""
     @State private var warmUpMinutes = "0"
     @State private var warmUpSeconds = "30"
@@ -77,6 +105,27 @@ private struct AddTimerView: View {
     @State private var rounds = "8"
     @State private var errorMessage: String?
 
+    init(timer: HIITTimer? = nil, onFinish: (() -> Void)? = nil) {
+        self.timer = timer
+        self.onFinish = onFinish
+        if let timer {
+            let warmUp = seconds(fromMinutes: timer.warmUp)
+            let work = seconds(fromMinutes: timer.workPeriod)
+            let rest = seconds(fromMinutes: timer.restPeriod)
+            let coolDown = seconds(fromMinutes: timer.coolDown)
+            _name = State(initialValue: timer.name)
+            _warmUpMinutes = State(initialValue: "\(warmUp / 60)")
+            _warmUpSeconds = State(initialValue: "\(warmUp % 60)")
+            _workMinutes = State(initialValue: "\(work / 60)")
+            _workSeconds = State(initialValue: "\(work % 60)")
+            _restMinutes = State(initialValue: "\(rest / 60)")
+            _restSeconds = State(initialValue: "\(rest % 60)")
+            _coolDownMinutes = State(initialValue: "\(coolDown / 60)")
+            _coolDownSeconds = State(initialValue: "\(coolDown % 60)")
+            _rounds = State(initialValue: "\(timer.rounds)")
+        }
+    }
+
     private var durations: (warmUp: Int, work: Int, rest: Int, coolDown: Int)? {
         guard let warmUp = duration(minutes: warmUpMinutes, seconds: warmUpSeconds),
               let work = duration(minutes: workMinutes, seconds: workSeconds),
@@ -88,64 +137,80 @@ private struct AddTimerView: View {
     }
 
     private var roundsValue: Int? {
-        guard let value = Int(rounds), value > 0 else {
+        guard let value = Int(rounds), (1...30).contains(value) else {
             return nil
         }
         return value
     }
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Timer") {
-                    TextField("Timer name", text: $name)
-                        .textInputAutocapitalization(.words)
-                        .accessibilityIdentifier("timer.name")
-                }
+        if timer == nil {
+            NavigationStack {
+                form
+            }
+        } else {
+            form
+        }
+    }
 
-                Section {
-                    durationField("Warm-up", minutes: $warmUpMinutes, seconds: $warmUpSeconds, identifier: "timer.warmUp")
-                    durationField("Work", minutes: $workMinutes, seconds: $workSeconds, identifier: "timer.workPeriod")
-                    durationField("Rest", minutes: $restMinutes, seconds: $restSeconds, identifier: "timer.restPeriod")
-                    durationField("Cool-down", minutes: $coolDownMinutes, seconds: $coolDownSeconds, identifier: "timer.coolDown")
-                    HStack {
-                        Text("Work rounds")
-                        Spacer()
-                        TextField("Rounds", text: $rounds)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .accessibilityIdentifier("timer.rounds")
-                    }
-                } header: {
-                    Text("Durations")
-                } footer: {
-                    Text("Each duration starts at 0 minutes, 30 seconds. Seconds over 59 are converted automatically.")
-                }
+    private var form: some View {
+        Form {
+            Section("Timer") {
+                TextField("Timer name", text: $name)
+                    .textInputAutocapitalization(.words)
+                    .accessibilityIdentifier("timer.name")
             }
-            .navigationTitle("New Timer")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+
+            Section {
+                durationField("Warm-up", minutes: $warmUpMinutes, seconds: $warmUpSeconds, identifier: "timer.warmUp")
+                durationField("Work", minutes: $workMinutes, seconds: $workSeconds, identifier: "timer.workPeriod")
+                durationField("Rest", minutes: $restMinutes, seconds: $restSeconds, identifier: "timer.restPeriod")
+                durationField("Cool-down", minutes: $coolDownMinutes, seconds: $coolDownSeconds, identifier: "timer.coolDown")
+                HStack {
+                    Text("Work rounds")
+                    Spacer()
+                    TextField("Rounds", text: $rounds)
+                        .keyboardType(.numberPad)
+                        .multilineTextAlignment(.trailing)
+                        .accessibilityIdentifier("timer.rounds")
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: saveTimer)
-                        .disabled(
-                            name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                            durations == nil ||
-                            roundsValue == nil
-                        )
-                        .accessibilityIdentifier("timer.save")
-                }
+            } header: {
+                Text("Durations")
+            } footer: {
+                Text("Seconds over 59 are converted automatically. Choose 1 to 30 work rounds so background alerts can be scheduled.")
             }
-            .alert("Couldn't Save Timer", isPresented: Binding(
-                get: { errorMessage != nil },
-                set: { if !$0 { errorMessage = nil } }
-            )) {
-                Button("OK", role: .cancel) { errorMessage = nil }
-            } message: {
-                Text(errorMessage ?? "")
+        }
+        .navigationTitle(timer == nil ? "New Timer" : "Edit Timer")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel", action: finish)
             }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("Save", action: saveTimer)
+                    .disabled(
+                        name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                        durations == nil ||
+                        roundsValue == nil
+                    )
+                    .accessibilityIdentifier("timer.save")
+            }
+        }
+        .alert("Couldn't Save Timer", isPresented: Binding(
+            get: { errorMessage != nil },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private func finish() {
+        if let onFinish {
+            onFinish()
+        } else {
+            dismiss()
         }
     }
 
@@ -205,24 +270,30 @@ private struct AddTimerView: View {
     private func saveTimer() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty, let durations, let roundsValue else {
-            errorMessage = "Enter a name, nonnegative durations, and at least one work round."
+            errorMessage = "Enter a name, nonnegative durations, and 1 to 30 work rounds."
             return
         }
 
-        let timer = HIITTimer(
-            name: trimmedName,
-            warmUp: Double(durations.warmUp) / 60,
-            coolDown: Double(durations.coolDown) / 60,
-            restPeriod: Double(durations.rest) / 60,
-            workPeriod: Double(durations.work) / 60,
-            rounds: roundsValue
-        )
-        modelContext.insert(timer)
+        let target = timer ?? HIITTimer(name: trimmedName)
+        let oldValues = (target.name, target.warmUp, target.coolDown, target.restPeriod, target.workPeriod, target.rounds)
+        target.name = trimmedName
+        target.warmUp = Double(durations.warmUp) / 60
+        target.coolDown = Double(durations.coolDown) / 60
+        target.restPeriod = Double(durations.rest) / 60
+        target.workPeriod = Double(durations.work) / 60
+        target.rounds = roundsValue
+        if timer == nil {
+            modelContext.insert(target)
+        }
         do {
             try modelContext.save()
-            dismiss()
+            finish()
         } catch {
-            modelContext.delete(timer)
+            if timer == nil {
+                modelContext.delete(target)
+            } else {
+                (target.name, target.warmUp, target.coolDown, target.restPeriod, target.workPeriod, target.rounds) = oldValues
+            }
             errorMessage = error.localizedDescription
         }
     }
@@ -230,26 +301,36 @@ private struct AddTimerView: View {
 
 private struct TimerDetailView: View {
     let timer: HIITTimer
+    @State private var isEditing = false
 
     var body: some View {
-        Form {
-            Section("Durations") {
-                LabeledContent("Warm-up", value: formatDuration(seconds(fromMinutes: timer.warmUp)))
-                LabeledContent("Work", value: formatDuration(seconds(fromMinutes: timer.workPeriod)))
-                LabeledContent("Rest", value: formatDuration(seconds(fromMinutes: timer.restPeriod)))
-                LabeledContent("Cool-down", value: formatDuration(seconds(fromMinutes: timer.coolDown)))
-                LabeledContent("Work rounds", value: "\(timer.rounds)")
+        if isEditing {
+            AddTimerView(timer: timer) {
+                isEditing = false
             }
-            Section {
-                NavigationLink {
-                    LiveTimerView(timer: timer)
-                } label: {
-                    Label("Start Workout", systemImage: "play.fill")
+        } else {
+            Form {
+                Section("Durations") {
+                    LabeledContent("Warm-up", value: formatDuration(seconds(fromMinutes: timer.warmUp)))
+                    LabeledContent("Work", value: formatDuration(seconds(fromMinutes: timer.workPeriod)))
+                    LabeledContent("Rest", value: formatDuration(seconds(fromMinutes: timer.restPeriod)))
+                    LabeledContent("Cool-down", value: formatDuration(seconds(fromMinutes: timer.coolDown)))
+                    LabeledContent("Work rounds", value: "\(timer.rounds)")
                 }
-                .accessibilityIdentifier("timer.startWorkout")
+                Section {
+                    NavigationLink {
+                        LiveTimerView(timer: timer)
+                    } label: {
+                        Label("Start Workout", systemImage: "play.fill")
+                    }
+                    .accessibilityIdentifier("timer.startWorkout")
+                }
+            }
+            .navigationTitle(timer.name)
+            .toolbar {
+                Button("Edit") { isEditing = true }
             }
         }
-        .navigationTitle(timer.name)
     }
 }
 
@@ -261,13 +342,17 @@ private struct WorkoutPhase {
 
 private struct LiveTimerView: View {
     let timer: HIITTimer
+    var autoStart = false
 
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var notifications = WorkoutNotifications()
     @State private var phaseIndex = 0
     @State private var remainingSeconds = 0
     @State private var deadline: Date?
     @State private var isRunning = false
     @State private var hasStarted = false
     @State private var isCompleted = false
+    @State private var hasAppeared = false
 
     private let ticker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
@@ -281,7 +366,7 @@ private struct LiveTimerView: View {
         if warmUp > 0 {
             result.append(WorkoutPhase(title: "Warm-up", duration: warmUp, round: nil))
         }
-        for round in 1...max(timer.rounds, 1) {
+        for round in 1...max(min(timer.rounds, 30), 1) {
             if work > 0 {
                 result.append(WorkoutPhase(title: "Work", duration: work, round: round))
             }
@@ -322,6 +407,12 @@ private struct LiveTimerView: View {
                     .font(.title2.weight(.semibold))
             }
 
+            if timer.rounds > 30 || timer.rounds < 1 {
+                Text("Edit this timer to use 1 to 30 work rounds before starting.")
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
             Text(formatClock(remainingSeconds))
                 .font(.system(size: 72, weight: .bold, design: .rounded).monospacedDigit())
                 .contentTransition(.numericText())
@@ -336,7 +427,7 @@ private struct LiveTimerView: View {
                     .frame(minWidth: 120)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(phases.isEmpty)
+                .disabled(phases.isEmpty || !(1...30).contains(timer.rounds))
                 .accessibilityIdentifier("timer.startPause")
 
                 Button(action: reset) {
@@ -349,22 +440,49 @@ private struct LiveTimerView: View {
         .padding()
         .navigationTitle(timer.name)
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear(perform: reset)
+        .onAppear {
+            if !hasAppeared {
+                hasAppeared = true
+                reset()
+                if autoStart, !phases.isEmpty, (1...30).contains(timer.rounds) {
+                    toggleRunning()
+                }
+            }
+        }
+        .onDisappear {
+            notifications.cancel()
+        }
         .onReceive(ticker) { now in
-            advance(to: now)
+            if scenePhase == .active {
+                advance(to: now, playSound: true)
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                advance(to: Date(), playSound: false)
+            }
+        }
+        .alert("Workout Alerts Unavailable", isPresented: Binding(
+            get: { notifications.errorMessage != nil },
+            set: { if !$0 { notifications.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { notifications.errorMessage = nil }
+        } message: {
+            Text(notifications.errorMessage ?? "")
         }
     }
 
     private func toggleRunning() {
         if isRunning {
             let now = Date()
-            advance(to: now)
+            advance(to: now, playSound: true)
             guard isRunning, let deadline else {
                 return
             }
             remainingSeconds = max(0, Int(ceil(deadline.timeIntervalSince(now))))
             self.deadline = nil
             isRunning = false
+            notifications.cancel()
             return
         }
 
@@ -380,20 +498,36 @@ private struct LiveTimerView: View {
         isCompleted = false
         deadline = Date().addingTimeInterval(TimeInterval(remainingSeconds == 0 ? currentPhase.duration : remainingSeconds))
         isRunning = true
+        if let deadline {
+            var alerts: [(date: Date, title: String)] = []
+            var nextDate = deadline
+            for index in (phaseIndex + 1)..<phases.count {
+                let phase = phases[index]
+                alerts.append((nextDate, phase.title))
+                nextDate = nextDate.addingTimeInterval(TimeInterval(phase.duration))
+            }
+            alerts.append((nextDate, "Workout Complete"))
+            notifications.schedule(alerts)
+        }
     }
 
-    private func advance(to now: Date) {
+    private func advance(to now: Date, playSound: Bool) {
         guard isRunning, var phaseDeadline = deadline else {
             return
         }
 
+        var changedPhase = false
         while now >= phaseDeadline {
+            changedPhase = true
             phaseIndex += 1
             guard phases.indices.contains(phaseIndex) else {
                 isRunning = false
                 isCompleted = true
                 remainingSeconds = 0
                 deadline = nil
+                if playSound {
+                    AudioServicesPlaySystemSound(1007)
+                }
                 return
             }
             phaseDeadline = phaseDeadline.addingTimeInterval(TimeInterval(phases[phaseIndex].duration))
@@ -401,9 +535,13 @@ private struct LiveTimerView: View {
 
         deadline = phaseDeadline
         remainingSeconds = max(0, Int(ceil(phaseDeadline.timeIntervalSince(now))))
+        if changedPhase && playSound {
+            AudioServicesPlaySystemSound(1007)
+        }
     }
 
     private func reset() {
+        notifications.cancel()
         phaseIndex = 0
         remainingSeconds = phases.first?.duration ?? 0
         deadline = nil
