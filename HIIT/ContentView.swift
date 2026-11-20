@@ -6,7 +6,7 @@
 //
 
 import Combine
-import AudioToolbox
+import AVFoundation
 import SwiftData
 import SwiftUI
 
@@ -15,6 +15,7 @@ struct ContentView: View {
     @Query private var timers: [HIITTimer]
     @State private var isAddingTimer = false
     @State private var playingTimer: HIITTimer?
+    @State private var deleteError: String?
 
     var body: some View {
         NavigationSplitView {
@@ -74,6 +75,14 @@ struct ContentView: View {
                             Button("Done") { playingTimer = nil }
                         }
                     }
+                    .alert("Couldn't Delete Timer", isPresented: Binding(
+                        get: { deleteError != nil },
+                        set: { if !$0 { deleteError = nil } }
+                    )) {
+                        Button("OK", role: .cancel) { deleteError = nil }
+                    } message: {
+                        Text(deleteError ?? "")
+                    }
             }
         }
     }
@@ -82,6 +91,12 @@ struct ContentView: View {
         withAnimation {
             for index in offsets {
                 modelContext.delete(timers[index])
+            }
+            do {
+                try modelContext.save()
+            } catch {
+                modelContext.rollback()
+                deleteError = error.localizedDescription
             }
         }
     }
@@ -103,6 +118,7 @@ private struct AddTimerView: View {
     @State private var coolDownMinutes = "0"
     @State private var coolDownSeconds = "30"
     @State private var rounds = "8"
+    @State private var countdownSoundEnabled = true
     @State private var errorMessage: String?
 
     init(timer: HIITTimer? = nil, onFinish: (() -> Void)? = nil) {
@@ -123,6 +139,7 @@ private struct AddTimerView: View {
             _coolDownMinutes = State(initialValue: "\(coolDown / 60)")
             _coolDownSeconds = State(initialValue: "\(coolDown % 60)")
             _rounds = State(initialValue: "\(timer.rounds)")
+            _countdownSoundEnabled = State(initialValue: timer.countdownSoundEnabled)
         }
     }
 
@@ -137,11 +154,13 @@ private struct AddTimerView: View {
     }
 
     private var roundsValue: Int? {
-        guard let value = Int(rounds), (1...30).contains(value) else {
+        guard let value = Int(rounds), (1...maximumRounds).contains(value) else {
             return nil
         }
         return value
     }
+
+    private var maximumRounds: Int { countdownSoundEnabled ? 15 : 30 }
 
     var body: some View {
         if timer == nil {
@@ -177,7 +196,14 @@ private struct AddTimerView: View {
             } header: {
                 Text("Durations")
             } footer: {
-                Text("Seconds over 59 are converted automatically. Choose 1 to 30 work rounds so background alerts can be scheduled.")
+                Text("Seconds over 59 are converted automatically. Choose 1 to \(maximumRounds) rounds so background alerts can be scheduled.")
+            }
+
+            Section {
+                Toggle("Countdown sound", isOn: $countdownSoundEnabled)
+                    .accessibilityIdentifier("timer.countdownSound")
+            } footer: {
+                Text("A clapper sounds at 5 seconds for phases of 30 seconds or longer, or 3 seconds for shorter phases. Phases of 3 seconds or less have no countdown sound.")
             }
         }
         .navigationTitle(timer == nil ? "New Timer" : "Edit Timer")
@@ -270,18 +296,19 @@ private struct AddTimerView: View {
     private func saveTimer() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedName.isEmpty, let durations, let roundsValue else {
-            errorMessage = "Enter a name, nonnegative durations, and 1 to 30 work rounds."
+            errorMessage = "Enter a name, nonnegative durations, and 1 to \(maximumRounds) work rounds."
             return
         }
 
         let target = timer ?? HIITTimer(name: trimmedName)
-        let oldValues = (target.name, target.warmUp, target.coolDown, target.restPeriod, target.workPeriod, target.rounds)
+        let oldValues = (target.name, target.warmUp, target.coolDown, target.restPeriod, target.workPeriod, target.rounds, target.countdownSoundEnabled)
         target.name = trimmedName
         target.warmUp = Double(durations.warmUp) / 60
         target.coolDown = Double(durations.coolDown) / 60
         target.restPeriod = Double(durations.rest) / 60
         target.workPeriod = Double(durations.work) / 60
         target.rounds = roundsValue
+        target.countdownSoundEnabled = countdownSoundEnabled
         if timer == nil {
             modelContext.insert(target)
         }
@@ -292,7 +319,7 @@ private struct AddTimerView: View {
             if timer == nil {
                 modelContext.delete(target)
             } else {
-                (target.name, target.warmUp, target.coolDown, target.restPeriod, target.workPeriod, target.rounds) = oldValues
+                (target.name, target.warmUp, target.coolDown, target.restPeriod, target.workPeriod, target.rounds, target.countdownSoundEnabled) = oldValues
             }
             errorMessage = error.localizedDescription
         }
@@ -316,6 +343,7 @@ private struct TimerDetailView: View {
                     LabeledContent("Rest", value: formatDuration(seconds(fromMinutes: timer.restPeriod)))
                     LabeledContent("Cool-down", value: formatDuration(seconds(fromMinutes: timer.coolDown)))
                     LabeledContent("Work rounds", value: "\(timer.rounds)")
+                    LabeledContent("Countdown sound", value: timer.countdownSoundEnabled ? "On" : "Off")
                 }
                 Section {
                     NavigationLink {
@@ -334,12 +362,6 @@ private struct TimerDetailView: View {
     }
 }
 
-private struct WorkoutPhase {
-    let title: String
-    let duration: Int
-    let round: Int?
-}
-
 private struct LiveTimerView: View {
     let timer: HIITTimer
     var autoStart = false
@@ -353,6 +375,8 @@ private struct LiveTimerView: View {
     @State private var hasStarted = false
     @State private var isCompleted = false
     @State private var hasAppeared = false
+    @State private var countdownPlayed = false
+    @State private var effectPlayers: [String: AVAudioPlayer] = [:]
 
     private let ticker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
 
@@ -407,8 +431,8 @@ private struct LiveTimerView: View {
                     .font(.title2.weight(.semibold))
             }
 
-            if timer.rounds > 30 || timer.rounds < 1 {
-                Text("Edit this timer to use 1 to 30 work rounds before starting.")
+            if !(1...maximumRounds).contains(timer.rounds) {
+                Text("Edit this timer to use 1 to \(maximumRounds) work rounds before starting.")
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
@@ -427,7 +451,7 @@ private struct LiveTimerView: View {
                     .frame(minWidth: 120)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(phases.isEmpty || !(1...30).contains(timer.rounds))
+                .disabled(phases.isEmpty || !(1...maximumRounds).contains(timer.rounds))
                 .accessibilityIdentifier("timer.startPause")
 
                 Button(action: reset) {
@@ -444,7 +468,7 @@ private struct LiveTimerView: View {
             if !hasAppeared {
                 hasAppeared = true
                 reset()
-                if autoStart, !phases.isEmpty, (1...30).contains(timer.rounds) {
+                if autoStart, !phases.isEmpty, (1...maximumRounds).contains(timer.rounds) {
                     toggleRunning()
                 }
             }
@@ -462,7 +486,7 @@ private struct LiveTimerView: View {
                 advance(to: Date(), playSound: false)
             }
         }
-        .alert("Workout Alerts Unavailable", isPresented: Binding(
+        .alert("Workout Sound or Alerts Unavailable", isPresented: Binding(
             get: { notifications.errorMessage != nil },
             set: { if !$0 { notifications.errorMessage = nil } }
         )) {
@@ -471,6 +495,8 @@ private struct LiveTimerView: View {
             Text(notifications.errorMessage ?? "")
         }
     }
+
+    private var maximumRounds: Int { timer.countdownSoundEnabled ? 15 : 30 }
 
     private func toggleRunning() {
         if isRunning {
@@ -499,15 +525,13 @@ private struct LiveTimerView: View {
         deadline = Date().addingTimeInterval(TimeInterval(remainingSeconds == 0 ? currentPhase.duration : remainingSeconds))
         isRunning = true
         if let deadline {
-            var alerts: [(date: Date, title: String)] = []
-            var nextDate = deadline
-            for index in (phaseIndex + 1)..<phases.count {
-                let phase = phases[index]
-                alerts.append((nextDate, phase.title))
-                nextDate = nextDate.addingTimeInterval(TimeInterval(phase.duration))
-            }
-            alerts.append((nextDate, "Workout Complete"))
-            notifications.schedule(alerts)
+            notifications.schedule(WorkoutAlert.schedule(
+                phases: phases,
+                currentIndex: phaseIndex,
+                deadline: deadline,
+                countdownEnabled: timer.countdownSoundEnabled,
+                countdownPlayed: countdownPlayed
+            ))
         }
     }
 
@@ -520,13 +544,14 @@ private struct LiveTimerView: View {
         while now >= phaseDeadline {
             changedPhase = true
             phaseIndex += 1
+            countdownPlayed = false
             guard phases.indices.contains(phaseIndex) else {
                 isRunning = false
                 isCompleted = true
                 remainingSeconds = 0
                 deadline = nil
                 if playSound {
-                    AudioServicesPlaySystemSound(1007)
+                    playEffect(named: "round-bell")
                 }
                 return
             }
@@ -535,8 +560,32 @@ private struct LiveTimerView: View {
 
         deadline = phaseDeadline
         remainingSeconds = max(0, Int(ceil(phaseDeadline.timeIntervalSince(now))))
-        if changedPhase && playSound {
-            AudioServicesPlaySystemSound(1007)
+        if playSound && changedPhase {
+            playEffect(named: "round-bell")
+        }
+        if timer.countdownSoundEnabled, !countdownPlayed,
+           let countdownSeconds = currentPhase?.countdownSeconds,
+           now >= phaseDeadline.addingTimeInterval(-TimeInterval(countdownSeconds)) {
+            countdownPlayed = true
+            if playSound {
+                playEffect(named: "clapper")
+            }
+        }
+    }
+
+    private func playEffect(named name: String) {
+        do {
+            guard let url = Bundle.main.url(forResource: name, withExtension: "wav") else {
+                notifications.errorMessage = "The workout sound file is missing: \(name).wav."
+                return
+            }
+            let player = try AVAudioPlayer(contentsOf: url)
+            effectPlayers[name] = player
+            if !player.play() {
+                notifications.errorMessage = "The workout sound could not be played."
+            }
+        } catch {
+            notifications.errorMessage = "The workout sound could not be played: \(error.localizedDescription)"
         }
     }
 
@@ -548,6 +597,7 @@ private struct LiveTimerView: View {
         isRunning = false
         hasStarted = false
         isCompleted = false
+        countdownPlayed = false
     }
 }
 

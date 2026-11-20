@@ -2,6 +2,56 @@ import Combine
 import Foundation
 import UserNotifications
 
+struct WorkoutPhase {
+    let title: String
+    let duration: Int
+    let round: Int?
+
+    var countdownSeconds: Int? {
+        guard duration > 3 else { return nil }
+        return duration >= 30 ? 5 : 3
+    }
+}
+
+struct WorkoutAlert {
+    enum Sound: Equatable {
+        case countdown
+        case bell
+    }
+
+    let date: Date
+    let title: String
+    let sound: Sound
+
+    static func schedule(
+        phases: [WorkoutPhase],
+        currentIndex: Int,
+        deadline: Date,
+        countdownEnabled: Bool,
+        countdownPlayed: Bool
+    ) -> [WorkoutAlert] {
+        var alerts: [WorkoutAlert] = []
+        var nextDate = deadline
+        for index in currentIndex..<phases.count {
+            let phase = phases[index]
+            if index > currentIndex {
+                nextDate = nextDate.addingTimeInterval(TimeInterval(phase.duration))
+            }
+            if countdownEnabled, let seconds = phase.countdownSeconds,
+               !(index == currentIndex && countdownPlayed) {
+                alerts.append(WorkoutAlert(
+                    date: nextDate.addingTimeInterval(-TimeInterval(seconds)),
+                    title: "\(phase.title): \(seconds) seconds remaining",
+                    sound: .countdown
+                ))
+            }
+            let nextTitle = index + 1 < phases.count ? phases[index + 1].title : "Workout Complete"
+            alerts.append(WorkoutAlert(date: nextDate, title: nextTitle, sound: .bell))
+        }
+        return alerts
+    }
+}
+
 @MainActor
 final class WorkoutNotifications: ObservableObject {
     @Published var errorMessage: String?
@@ -16,7 +66,7 @@ final class WorkoutNotifications: ObservableObject {
         identifiers = []
     }
 
-    func schedule(_ alerts: [(date: Date, title: String)]) {
+    func schedule(_ alerts: [WorkoutAlert]) {
         cancel()
         let currentGeneration = generation
 
@@ -47,7 +97,12 @@ final class WorkoutNotifications: ObservableObject {
                     identifiers.append(identifier)
                     let content = UNMutableNotificationContent()
                     content.title = alert.title
-                    content.sound = .default
+                    switch alert.sound {
+                    case .countdown:
+                        content.sound = UNNotificationSound(named: UNNotificationSoundName("clapper.wav"))
+                    case .bell:
+                        content.sound = UNNotificationSound(named: UNNotificationSoundName("round-bell.wav"))
+                    }
                     let trigger = UNTimeIntervalNotificationTrigger(timeInterval: delay, repeats: false)
                     let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
                     try await center.add(request)

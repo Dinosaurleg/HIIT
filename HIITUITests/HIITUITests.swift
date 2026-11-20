@@ -50,12 +50,12 @@ final class HIITUITests: XCTestCase {
         XCTAssertTrue(save.isEnabled)
         save.tap()
 
-        XCTAssertTrue(app.staticTexts[name].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.staticTexts["1:30 work / 0:01 rest"].exists)
+        scrollToElement(app.staticTexts[name], app: app)
+        XCTAssertTrue(app.staticTexts["1:30 work / 0:01 rest / 8 rounds"].exists)
 
         app.terminate()
         app.launch()
-        XCTAssertTrue(app.staticTexts[name].waitForExistence(timeout: 5))
+        scrollToElement(app.staticTexts[name], app: app)
         app.staticTexts[name].tap()
         XCTAssertTrue(app.staticTexts["Work, 1:30"].waitForExistence(timeout: 5))
     }
@@ -73,7 +73,7 @@ final class HIITUITests: XCTestCase {
         app.buttons["timer.save"].tap()
 
         let timerRow = app.staticTexts[name]
-        XCTAssertTrue(timerRow.waitForExistence(timeout: 5))
+        scrollToElement(timerRow, app: app)
         timerRow.tap()
         app.buttons["timer.startWorkout"].tap()
 
@@ -105,10 +105,92 @@ final class HIITUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts[name].exists)
     }
 
+    @MainActor
+    func testListPlayAndInlineEditing() throws {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Add Timer"].tap()
+
+        let name = "Edit \(UUID().uuidString.prefix(8))"
+        let renamed = "Updated \(UUID().uuidString.prefix(8))"
+        let nameField = app.textFields["timer.name"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+        enterText(in: nameField, with: name, app: app)
+        app.buttons["timer.save"].tap()
+
+        let play = app.buttons["Play \(name)"]
+        scrollToElement(play, app: app)
+        play.tap()
+        XCTAssertEqual(app.buttons["timer.startPause"].label, "Pause")
+        app.buttons["Done"].tap()
+
+        app.staticTexts[name].tap()
+        XCTAssertTrue(app.buttons["timer.startWorkout"].waitForExistence(timeout: 5))
+        app.buttons["Edit"].tap()
+        XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.sheets.count, 0)
+        replaceText(in: nameField, with: renamed, app: app)
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.navigationBars[name].waitForExistence(timeout: 5))
+
+        app.buttons["Edit"].tap()
+        replaceText(in: nameField, with: renamed, app: app)
+        let countdown = app.switches["timer.countdownSound"]
+        XCTAssertTrue(countdown.waitForExistence(timeout: 5))
+        XCTAssertEqual(countdown.value as? String, "1")
+        app.swipeUp()
+        countdown.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.5)).tap()
+        XCTAssertEqual(countdown.value as? String, "0", countdown.debugDescription)
+        app.buttons["timer.save"].tap()
+        XCTAssertTrue(app.navigationBars[renamed].waitForExistence(timeout: 5))
+        app.swipeUp()
+        XCTAssertTrue(app.staticTexts["Countdown sound, Off"].exists, app.debugDescription)
+
+        app.terminate()
+        app.launch()
+        scrollToElement(app.staticTexts[renamed], app: app)
+        app.staticTexts[renamed].tap()
+        app.swipeUp()
+        XCTAssertTrue(app.staticTexts["Countdown sound, Off"].waitForExistence(timeout: 5), app.debugDescription)
+    }
+
+    @MainActor
+    func testSwipeDeletesTimer() throws {
+        let app = XCUIApplication()
+        app.launch()
+        app.buttons["Add Timer"].tap()
+        let name = "Delete \(UUID().uuidString.prefix(8))"
+        let nameField = app.textFields["timer.name"]
+        XCTAssertTrue(nameField.waitForExistence(timeout: 5))
+        enterText(in: nameField, with: name, app: app)
+        app.buttons["timer.save"].tap()
+
+        let row = app.staticTexts[name]
+        scrollToElement(row, app: app)
+        row.swipeLeft()
+        app.buttons["Delete"].tap()
+        XCTAssertFalse(row.exists)
+        app.terminate()
+        app.launch()
+        XCTAssertFalse(app.staticTexts[name].exists)
+    }
+
     private func enterText(in textField: XCUIElement, with value: String, app: XCUIApplication) {
         textField.tap()
         XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 5))
         textField.typeText(value)
+    }
+
+    private func scrollToElement(_ element: XCUIElement, app: XCUIApplication) {
+        let list = app.collectionViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        for _ in 0..<20 {
+            if element.exists && element.isHittable {
+                return
+            }
+            list.swipeUp()
+        }
+        XCTFail("Could not find \(element)")
     }
 
     private func replaceText(in textField: XCUIElement, with value: String, app: XCUIApplication) {

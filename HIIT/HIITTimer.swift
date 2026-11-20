@@ -17,6 +17,7 @@ final class HIITTimer {
     var restPeriod: Double
     var workPeriod: Double
     var rounds: Int = 8
+    var countdownSoundEnabled: Bool = true
     
     init(
         name: String,
